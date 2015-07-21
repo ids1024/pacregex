@@ -11,10 +11,7 @@ import urllib.request
 import json
 import tarfile
 
-datadir = os.path.expanduser("~/.communitytags/")
-tagdir = datadir + 'tags/'
-syncurl = "git://github.com/ids1024/archcommunitytags"
-pacneturl = "http://pacnet.archlinux.pl/api/packages/"
+datadir = os.path.expanduser("~/.pacregex/")
 handle = config.init_with_config("/etc/pacman.conf")
 
 operator = pyparsing.Regex("!=|=").setName("operator")
@@ -34,20 +31,7 @@ class EvaluationError(Exception):
     pass
 
 
-def parseTags(filename):
-    with open(filename) as file:
-        for line in file:
-            tag = line.split('#')[0].strip()
-            if tag:
-                yield tag
-
-
 def parseMetadata():
-    # This could be stored in an sqlite database for speed
-    with open(datadir + '.pacnet') as file:
-        pacnet = json.load(file)
-    categories = {package['name']: package['category__name']
-                  for package in pacnet}
     syncpkgs = (pkg for db in handle.get_syncdbs() for pkg in db.pkgcache)
     packages = {}
     for package in syncpkgs:
@@ -64,33 +48,13 @@ def parseMetadata():
         pacmeta['url'] = [package.url or '']
         pacmeta['desc'] = [package.desc]
         pacmeta['repo'] = [package.db.name]
-        pacmeta['category'] = [categories.get(package.name, 'No')]
-        pacmeta['tag'] = []
-        if package.name in os.listdir(tagdir):
-            pacmeta['tag'] = parseTags(tagdir + package.name)
         packages[package.name] = pacmeta
-
-    # Handle renamed packages
-    for i in os.listdir(tagdir):
-        if i not in packages:
-            pacmeta = next((v for k, v in packages.items()
-                if i in v['replace']), None)
-            if pacmeta:
-                pacmeta['tag'] = parseTags(tagdir + i)
 
     return packages
 
 
 def sync():
-    if not os.path.exists(datadir):
-        returnval = subprocess.call(["git", "clone", syncurl, datadir],
-                                    stdout=sys.stderr)
-    else:
-        returnval = subprocess.call(["git", "-C", datadir, "pull"],
-                                    stdout=sys.stderr)
-    if returnval != 0:
-        print("Error: git returned nonzero exit status", file=sys.stderr)
-        sys.exit(1)
+    os.makedirs(datadir, exist_ok=True)
     origdir = os.getcwd()
     os.chdir(datadir)
     print("Getting file lists from sync dbs...", file=sys.stderr)
@@ -134,43 +98,23 @@ def sync():
         tar.close()
     os.chdir('..')
 
-    with open('.filelist', 'w') as file:
+    with open('filelist', 'w') as file:
         json.dump(filelist, file)
-    print("Syncing with pacnet...", file=sys.stderr)
-    pacnetdata = urllib.request.urlopen(pacneturl).read().decode()
-    with open('.pacnet', 'w') as file:
-        file.write(pacnetdata)
     os.chdir(origdir)
 
 
-def getTags():
-    syncpkgs = (pkg for db in handle.get_syncdbs() for pkg in db.pkgcache)
-    tags = {}
-    for package in syncpkgs:
-        if package.name in os.listdir(tagdir):
-            with open(tagdir + package.name) as file:
-                for line in file:
-                    tag = line.split('#')[0].strip()
-                    if not tag:
-                        continue
-                    if tag not in tags:
-                        tags[tag] = []
-                    tags[tag].append(package.name)
-    return tags
-
-
-def evaluateExpr(pacmeta, tokens, regex):
+def evaluateExpr(pacmeta, tokens):
     if len(tokens) == 1 and isinstance(tokens[0], str):
         return (tokens[0] in pacmeta) and pacmeta[tokens[0]]
     if len(tokens) == 1:
-        return evaluateExpr(pacmeta, tokens[0], regex)
+        return evaluateExpr(pacmeta, tokens[0])
     if len(tokens) == 2 and tokens[0] == 'not':
-        return not evaluateExpr(pacmeta, tokens[1], regex)
+        return not evaluateExpr(pacmeta, tokens[1])
 
     operator = tokens[1]
     if operator in ('and', 'or'):
         values = (i if isinstance(i, bool) else
-                  evaluateExpr(pacmeta, i, regex)
+                  evaluateExpr(pacmeta, i)
                   for i in tokens[::2])  # All but operators
         return ((operator == 'and' and all(values)) or
                 (operator == 'or' and any(values)))
@@ -179,13 +123,10 @@ def evaluateExpr(pacmeta, tokens, regex):
         pacvalues = pacmeta.get(tokens[0], ())
         if tokens[0] == 'file':
             if not filelist:
-                with open(datadir + '.filelist') as file:
+                with open(datadir + 'filelist') as file:
                     filelist = json.load(file)
             pacvalues = filelist.get(pacmeta['name'][0], ())
-        if regex:
-            match = any(re.match(tokens[2], i) for i in pacvalues)
-        else:
-            match = tokens[2] in pacvalues
+        match = any(re.match(tokens[2], i) for i in pacvalues)
         return (operator == '=' and match) or (operator == '!=' and not match)
     else:
         # This code should never be reached; raise exception if it is
@@ -194,13 +135,9 @@ def evaluateExpr(pacmeta, tokens, regex):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Package tags provided by the community')
+        description='Advanced regex search of pacman repositories')
     parser.add_argument('--sync', action='store_true',
-                        help='synchronize with server')
-    parser.add_argument('--tags', action='store_true',
-                        help='list all tags')
-    parser.add_argument('-r', '--regex', action='store_true',
-                        help='support regular expressions in search')
+                        help='synchronize file lists')
     parser.add_argument('query', nargs='?', default='')
     args = parser.parse_args()
 
@@ -208,14 +145,9 @@ if __name__ == "__main__":
         sync()
         sys.exit(0)
     if not os.path.exists(datadir):
-        print("Metadata directory does not exist: running initial sync",
+        print("Data directory does not exist: running initial sync",
               file=sys.stderr)
         sync()
-    if args.tags:
-        tags = sorted(getTags().items(), key=lambda x: len(x[1]), reverse=True)
-        for k, v in tags:
-            print(k + ' ' + str(len(v)))
-        sys.exit(0)
 
     packages = parseMetadata().items()
     if not args.query:
@@ -228,6 +160,6 @@ if __name__ == "__main__":
             print("Error parsing query at column " + str(e.col))
             sys.exit(1)
         matches = (package for package, pacmeta in packages
-                   if evaluateExpr(pacmeta, tree, args.regex))
+                   if evaluateExpr(pacmeta, tree))
     for i in matches:
         print(i)
