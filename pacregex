@@ -126,7 +126,7 @@ def evaluateExpr(pacmeta, tokens):
                 with open(datadir + 'filelist') as file:
                     filelist = json.load(file)
             pacvalues = filelist.get(pacmeta['name'][0], ())
-        match = any(re.match(tokens[2], i) for i in pacvalues)
+        match = any(re.findall(tokens[2], i) for i in pacvalues)
         return (operator == '=' and match) or (operator == '!=' and not match)
     else:
         # This code should never be reached; raise exception if it is
